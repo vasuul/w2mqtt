@@ -18,100 +18,6 @@ from subprocess import check_output
 
 VERSION = "0.0.2"
 
-class BME280:
-    def __init__(self, addr, bus_num=1):
-        self._addr = addr
-        self._bus_num = bus_num
-        self._bus = smbus.SMBus(self._bus_num)
-        self.setup()
-
-    def setup(self):
-        # Write to the config register
-        # 20ms standby, 16x filter cooef, disable SPI
-        self._bus.write_byte_data(self._addr, 0xF5, 0xF0)
-
-        # Then write the humidity control register
-        self._bus.write_byte_data(self._addr, 0xF2, 0x00) # disable
-
-        # Then we write to the control register
-        # 16 temp/press oversampling - normal mode
-        self._bus.write_byte_data(self._addr, 0xF4, 0xB3)
-
-        # then get our cal data
-        self.tcal = [
-            self.read_ushort(0x88),
-            self.read_short(0x8A),
-            self.read_short(0x8C)]
-        self.pcal = [
-            self.read_ushort(0x8E),
-            self.read_short(0x90),
-            self.read_short(0x92),
-            self.read_short(0x94),
-            self.read_short(0x96),
-            self.read_short(0x98),
-            self.read_short(0x9A),
-            self.read_short(0x9C),
-            self.read_short(0x9E)]
-
-    def reading(self):
-        # Read temp and pressure
-        rawd = self._bus.read_i2c_block_data(self._addr, 0xF7, 6)
-        rawp = (rawd[0] << 12) | (rawd[1] << 4) | (rawd[2] >> 4)
-        rawt = (rawd[3] << 12) | (rawd[4] << 4) | (rawd[5] >> 4)
-
-        # Refine temperature - straight from the datasheet
-        rt1 = ((((rawt >> 3) - (self.tcal[0]<<1)) * self.tcal[1]) >> 11)
-        rt2 = ((((rawt >> 4) - self.tcal[0]) * ((rawt >> 4) - self.tcal[0]) >> 12) * self.tcal[2]) >> 14
-        temp = (((rt1 + rt2) * 5) + 128)  >> 8
-
-        # Refine pressure - straight from the datasheet
-        rp1 = (rt1 + rt2) - 128000
-        rp2 = rp1 * rp1 * self.pcal[5]
-        rp2 = rp2 + ((rp1 * self.pcal[4]) << 17)
-        rp2 = rp2 + (self.pcal[3] << 35)
-        rp1 = ((rp1 * rp1 * self.pcal[2]) >> 8) + ((rp1 * self.pcal[1]) <<12)
-        rp1 = (((1 << 47) + rp1) * self.pcal[0]) >> 33
-        if rp1 == 0:
-            pres = 0
-        else:
-            pres = 1048576 - rawp
-            pres = int((((pres << 31) - rp2) * 3125 ) / rp1)
-            rp1 = (self.pcal[8] * (pres >> 13) * (pres >> 13) ) >> 25
-            rp2 = (self.pcal[7] * pres ) >> 19
-            pres = ((pres + rp1 + rp2) >> 8) + (self.pcal[6] << 4)
-
-        return temp/100.0, (pres/256.0)/100.0
-
-    def read_short(self, reg):
-        dat = self._bus.read_i2c_block_data(self._addr, reg, 2)
-        return c_short((dat[1] << 8) | dat[0]).value
-
-    def read_ushort(self, reg):
-        dat = self._bus.read_i2c_block_data(self._addr, reg, 2)
-        return (dat[1] << 8) | dat[0]
-
-    def read_byte(self, reg):
-        dat = self._bus.read_i2c_block_data(self._addr, reg, 1)
-        if dat > 127:
-            return dat - 256
-        else:
-            return dat
-
-    def read_ubyte(self, reg):
-        dat = self._bus.read_i2c_block_data(self._addr, reg, 1)
-        return dat
-
-    def publishMQTT(self, mqttc, baseTopic):
-        t,p = self.reading()
-        topic = "base"
-        if len(baseTopic) > 0:
-            topic = baseTopic + "/" + topic
-        payload = "{ "
-        payload += "\"temp\": {tt}, \"press\": {pp}".format(tt=t, pp=p)
-        payload += " }"
-        mqttc.publish(topic, payload)
-
-
 class SensorList:
     def __init__(self, sensorNames):
         # Keep track of timestamp / id pairs.  Many of these sensors
@@ -422,9 +328,7 @@ def main(configFile = "/etc/w2mqtt.conf"):
     worker = Thread(target=processInput, args=(inpq,))
     worker.daemon = True
     sensors = SensorList(sensorNames)
-    pres = BME280(0x77)
-
-    lastPressureTime = 0
+    
     lastInputTime = time.time()
     ignored = []
     # And just sit here waiting for data
@@ -449,13 +353,6 @@ def main(configFile = "/etc/w2mqtt.conf"):
         else:
             # Just wait a small bit of time for more data
             sleep(0.1)
-
-        # Check to see if we should try and read from our barometer
-        #  read from it every 30 seconds
-        if thisTime - lastPressureTime > 15:
-            # Read pressure and temp from bme280 sensor
-            pres.publishMQTT(mqttc, mqtt_config['topic'])
-            lastPressureTime = thisTime
 
         if thisTime - lastInputTime > (60):
             # RTL 433 seems to have locked up.  The only way I have 
