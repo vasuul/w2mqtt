@@ -1,0 +1,14 @@
+[Unit]
+Description=Weather to MQTT service
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pi
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/w2mqtt_wrapper.sh
+
+[Install]
+WantedBy=multi-user.target
